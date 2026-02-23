@@ -1,7 +1,7 @@
-using Rf2DsxBridge.Effects;
-using Rf2DsxBridge.Hid;
+using Ams2DsxBridge.Effects;
+using Ams2DsxBridge.Hid;
 
-namespace Rf2DsxBridge.Output;
+namespace Ams2DsxBridge.Output;
 
 public sealed class HidOutputSink : IOutputSink
 {

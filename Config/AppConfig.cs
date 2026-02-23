@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Rf2DsxBridge.Config;
+namespace Ams2DsxBridge.Config;
 
 public sealed class AppConfig
 {

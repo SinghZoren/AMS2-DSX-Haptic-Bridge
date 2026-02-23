@@ -1,7 +1,7 @@
-using Rf2DsxBridge.Config;
-using Rf2DsxBridge.Telemetry;
+using Ams2DsxBridge.Config;
+using Ams2DsxBridge.Telemetry;
 
-namespace Rf2DsxBridge.Effects;
+namespace Ams2DsxBridge.Effects;
 
 public sealed class RumbleEffectsEngine
 {

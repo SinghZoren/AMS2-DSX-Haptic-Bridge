@@ -1,7 +1,7 @@
-using Rf2DsxBridge.Dsx;
-using Rf2DsxBridge.Effects;
+using Ams2DsxBridge.Dsx;
+using Ams2DsxBridge.Effects;
 
-namespace Rf2DsxBridge.Output;
+namespace Ams2DsxBridge.Output;
 
 public sealed class DsxOutputSink : IOutputSink
 {

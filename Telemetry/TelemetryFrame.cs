@@ -1,4 +1,4 @@
-namespace Rf2DsxBridge.Telemetry;
+namespace Ams2DsxBridge.Telemetry;
 
 public readonly struct WheelFrame
 {
@@ -120,11 +120,19 @@ public readonly struct TelemetryFrame
     }
 }
 
+/// <summary>
+/// Builds TelemetryFrame from AMS2/pCARS2 shared memory byte buffer.
+/// Uses byte offsets from Ams2Offsets to read fields with BitConverter.
+/// Estimates grip from ABS/TCS flags and acceleration since AMS2 doesn't
+/// expose per-wheel grip fraction or tire load directly.
+/// </summary>
 public sealed class TelemetryFrameBuilder
 {
-    private double[] _prevSuspDeflection = new double[4];
-    private double[] _prevWheelRotation = new double[4];
-    private double _prevImpactET;
+    private long _prevTickMs;
+    private float _prevCollisionMagnitude;
+    private uint _prevCrashState;
+    private float _prevAeroDamage;
+    private float _prevEngineDamage;
     private bool _initialized;
 
     private readonly double _wheelbaseMeter;
@@ -136,55 +144,113 @@ public sealed class TelemetryFrameBuilder
         _maxSteerAngleRad = maxSteerAngleDeg * Math.PI / 180.0;
     }
 
-    public TelemetryFrame Build(in rF2VehicleTelemetry veh)
+    private static float F(byte[] buf, int offset) => BitConverter.ToSingle(buf, offset);
+    private static int I32(byte[] buf, int offset) => BitConverter.ToInt32(buf, offset);
+    private static uint U32(byte[] buf, int offset) => BitConverter.ToUInt32(buf, offset);
+
+    public TelemetryFrame Build(byte[] buf)
     {
-        double dt = Math.Max(veh.mDeltaTime, 0.001);
+        // Delta time from wall clock (AMS2 doesn't provide per-frame delta)
+        long nowMs = Environment.TickCount64;
+        double dt = _initialized ? Math.Max((nowMs - _prevTickMs) / 1000.0, 0.001) : 0.008;
+        _prevTickMs = nowMs;
 
-        double brake = Math.Clamp(veh.mUnfilteredBrake, 0, 1);
-        double throttle = Math.Clamp(veh.mUnfilteredThrottle, 0, 1);
-        double steering = Math.Clamp(veh.mUnfilteredSteering, -1, 1);
+        // Inputs
+        float brake = Math.Clamp(F(buf, Ams2Offsets.UnfilteredBrake), 0, 1);
+        float throttle = Math.Clamp(F(buf, Ams2Offsets.UnfilteredThrottle), 0, 1);
+        float steering = Math.Clamp(F(buf, Ams2Offsets.UnfilteredSteering), -1, 1);
 
-        double speedMps = Math.Sqrt(veh.mLocalVel.x * veh.mLocalVel.x +
-                                     veh.mLocalVel.y * veh.mLocalVel.y +
-                                     veh.mLocalVel.z * veh.mLocalVel.z);
+        // Speed (AMS2 provides it directly)
+        float speedMps = Math.Max(F(buf, Ams2Offsets.Speed), 0);
 
-        double latAccel = veh.mLocalAccel.x;
-        double longAccel = veh.mLocalAccel.z;
-        double yawRate = veh.mLocalRot.y;
-        double yawAccel = veh.mLocalRotAccel.y;
+        // Engine
+        float rpm = F(buf, Ams2Offsets.Rpm);
+        float maxRpm = F(buf, Ams2Offsets.MaxRPM);
+        int gear = I32(buf, Ams2Offsets.Gear);
+
+        // Acceleration: X=lateral, Z=longitudinal
+        float latAccel = F(buf, Ams2Offsets.LocalAcceleration);           // [0] = X
+        float longAccel = F(buf, Ams2Offsets.LocalAcceleration + 8);      // [2] = Z
+
+        // Angular velocity: Y=yaw
+        float yawRate = F(buf, Ams2Offsets.AngularVelocity + 4);          // [1] = Y
+
+        // Car flags for ABS/TCS state
+        uint carFlags = U32(buf, Ams2Offsets.CarFlags);
+        bool absActive = (carFlags & (uint)Ams2CarFlags.Abs) != 0;
+        bool tcsActive = (carFlags & (uint)Ams2CarFlags.TractionControl) != 0;
+
+        // Impact detection from crash state + collision + damage changes
+        uint crashState = U32(buf, Ams2Offsets.CrashState);
+        float collisionMag = F(buf, Ams2Offsets.LastOpponentCollisionMagnitude);
+        float aeroDamage = F(buf, Ams2Offsets.AeroDamage);
+        float engineDamage = F(buf, Ams2Offsets.EngineDamage);
 
         bool impactThisTick = false;
-        if (_initialized && veh.mLastImpactET != _prevImpactET && veh.mLastImpactMagnitude > 0.5)
+        float impactMagnitude = 0;
+        if (_initialized)
         {
-            impactThisTick = true;
-        }
-        _prevImpactET = veh.mLastImpactET;
+            // Car-to-car collision: magnitude changed
+            if (Math.Abs(collisionMag - _prevCollisionMagnitude) > 0.5f && collisionMag > 0.5f)
+            {
+                impactThisTick = true;
+                impactMagnitude = collisionMag;
+            }
 
+            // Wall/object hit: crash state transitions to LargeProp
+            if (crashState == Ams2CrashState.LargeProp && _prevCrashState != Ams2CrashState.LargeProp)
+            {
+                impactThisTick = true;
+                impactMagnitude = Math.Max(impactMagnitude, 40f);
+            }
+
+            // Damage increase indicates impact
+            float dmgDelta = Math.Max(
+                aeroDamage - _prevAeroDamage,
+                engineDamage - _prevEngineDamage);
+            if (dmgDelta > 0.01f)
+            {
+                impactThisTick = true;
+                impactMagnitude = Math.Max(impactMagnitude, dmgDelta * 150f);
+            }
+        }
+        _prevCollisionMagnitude = collisionMag;
+        _prevCrashState = crashState;
+        _prevAeroDamage = aeroDamage;
+        _prevEngineDamage = engineDamage;
+
+        // Per-wheel data
         var wheels = new WheelFrame[4];
         for (int i = 0; i < 4; i++)
         {
-            ref readonly var w = ref veh.mWheels[i];
+            float suspTravel = F(buf, Ams2Offsets.SuspensionTravel + i * 4);
+            float suspVel = F(buf, Ams2Offsets.SuspensionVelocity + i * 4);
+            float tyreRps = F(buf, Ams2Offsets.TyreRPS + i * 4);
+            uint terrain = U32(buf, Ams2Offsets.Terrain + i * 4);
 
-            double suspVel = 0;
-            double angVel = 0;
-            if (_initialized)
-            {
-                suspVel = (w.mSuspensionDeflection - _prevSuspDeflection[i]) / dt;
-                double rotDelta = w.mRotation - _prevWheelRotation[i];
-                angVel = rotDelta / dt;
-            }
-            _prevSuspDeflection[i] = w.mSuspensionDeflection;
-            _prevWheelRotation[i] = w.mRotation;
+            // Slip ratio from tire angular speed vs ground speed
+            const double tireRadius = 0.33; // typical racing tire radius in metres
+            double wheelSpeed = Math.Abs(tyreRps) * 2.0 * Math.PI * tireRadius;
+            double groundSpeed = Math.Max(Math.Abs(speedMps), 0.1);
+            double slipRatio = (wheelSpeed - groundSpeed) / groundSpeed;
 
-            double slipRatio = w.mLongitudinalPatchVel - w.mLongitudinalGroundVel;
-            double lateralSlipVel = w.mLateralPatchVel - w.mLateralGroundVel;
+            double angularVelocity = tyreRps * 2.0 * Math.PI;
 
             wheels[i] = new WheelFrame(
-                w.mSuspensionDeflection, suspVel, w.mSuspForce, w.mBrakePressure,
-                w.mTireLoad, w.mGripFract, slipRatio, lateralSlipVel,
-                w.mRotation, angVel, w.mSurfaceType);
+                suspTravel,         // SuspensionDeflection (using travel as proxy)
+                suspVel,            // SuspensionVelocity (provided directly by AMS2)
+                0,                  // SuspForce - not available in AMS2
+                brake,              // BrakePressure - use global brake input as proxy
+                0,                  // TireLoad - not available in AMS2
+                0,                  // GripFraction - estimated at frame level below
+                slipRatio,
+                0,                  // LateralSlipVel - not available in AMS2
+                0,                  // RotationRad - not tracked
+                angularVelocity,
+                (byte)(terrain & 0xFF));
         }
 
+        // Oversteer calculation (kinematic model)
         double oversteerAngle = 0;
         if (speedMps > 3.0)
         {
@@ -192,66 +258,61 @@ public sealed class TelemetryFrameBuilder
             double expectedYawRate = (steerAngle * speedMps) / _wheelbaseMeter;
             double yawDiff = Math.Abs(yawRate) - Math.Abs(expectedYawRate);
             if (yawDiff > 0)
-            {
                 oversteerAngle = yawDiff * (180.0 / Math.PI);
-            }
         }
+
+        // Grip estimation using ABS/TCS flags and acceleration
+        // The effects engines check grip vs thresholds (ABS: 0.85, TCS: 0.60)
+        // When ABS/TCS is active, we set grip below those thresholds
+        double totalAccel = Math.Sqrt(latAccel * latAccel + longAccel * longAccel);
+        double gripUsed = Math.Clamp(totalAccel / 25.0, 0, 1);
 
         double estFrontGrip, estRearGrip;
-        double rawGripSum = veh.mWheels[0].mGripFract + veh.mWheels[1].mGripFract
-                          + veh.mWheels[2].mGripFract + veh.mWheels[3].mGripFract;
-
-        if (rawGripSum > 0.01)
+        if (absActive)
         {
-            estFrontGrip = (veh.mWheels[0].mGripFract + veh.mWheels[1].mGripFract) * 0.5;
-            estRearGrip = (veh.mWheels[2].mGripFract + veh.mWheels[3].mGripFract) * 0.5;
-        }
-        else if (veh.mWheels[0].mTireLoad > 100 && veh.mWheels[2].mTireLoad > 100)
-        {
-            estFrontGrip = EstimateAxleGrip(veh.mWheels[0], veh.mWheels[1]);
-            estRearGrip = EstimateAxleGrip(veh.mWheels[2], veh.mWheels[3]);
+            // ABS active: grip below 0.85 threshold, scale with brake intensity
+            estFrontGrip = Math.Clamp(0.85 - brake * 0.35, 0.5, 0.82);
         }
         else
         {
-            double totalAccel = Math.Sqrt(latAccel * latAccel + longAccel * longAccel);
-            double gripUsed = Math.Clamp(totalAccel / 25.0, 0, 1);
-            estFrontGrip = brake > 0.1 ? Math.Min(gripUsed * 1.2, 1.0) : gripUsed * 0.8;
-            estRearGrip = throttle > 0.3 ? Math.Min(gripUsed * 1.2, 1.0) : gripUsed * 0.8;
+            estFrontGrip = brake > 0.1
+                ? Math.Clamp(1.0 - gripUsed * 0.15, 0.85, 1.0)
+                : Math.Clamp(1.0 - gripUsed * 0.1, 0.9, 1.0);
+        }
+
+        if (tcsActive)
+        {
+            // TCS active: grip below 0.60 threshold, scale with throttle
+            estRearGrip = Math.Clamp(0.60 - throttle * 0.25, 0.35, 0.55);
+        }
+        else
+        {
+            estRearGrip = throttle > 0.3
+                ? Math.Clamp(1.0 - gripUsed * 0.15, 0.60, 1.0)
+                : Math.Clamp(1.0 - gripUsed * 0.1, 0.7, 1.0);
         }
 
         _initialized = true;
 
-        return new TelemetryFrame(dt, veh.mElapsedTime,
+        double elapsedTime = nowMs / 1000.0;
+        return new TelemetryFrame(dt, elapsedTime,
             brake, throttle, steering,
             speedMps,
             latAccel, longAccel,
-            yawRate, yawAccel,
-            veh.mEngineRPM, veh.mEngineMaxRPM, veh.mGear,
-            veh.mLastImpactET, veh.mLastImpactMagnitude, impactThisTick,
+            yawRate, 0, // yaw acceleration not available in AMS2
+            rpm, maxRpm, gear,
+            elapsedTime, impactMagnitude, impactThisTick,
             wheels[0], wheels[1], wheels[2], wheels[3],
             oversteerAngle, estFrontGrip, estRearGrip);
-    }
-
-    private static double EstimateAxleGrip(in rF2Wheel w1, in rF2Wheel w2)
-    {
-        double g1 = EstimateWheelGrip(w1);
-        double g2 = EstimateWheelGrip(w2);
-        return (g1 + g2) * 0.5;
-    }
-
-    private static double EstimateWheelGrip(in rF2Wheel w)
-    {
-        if (w.mTireLoad < 100) return 0;
-        double combined = Math.Sqrt(w.mLateralForce * w.mLateralForce
-                                  + w.mLongitudinalForce * w.mLongitudinalForce);
-        return Math.Clamp(combined / (w.mTireLoad * 1.5), 0, 1);
     }
 
     public void Reset()
     {
         _initialized = false;
-        Array.Clear(_prevSuspDeflection);
-        Array.Clear(_prevWheelRotation);
-        _prevImpactET = 0;
+        _prevTickMs = 0;
+        _prevCollisionMagnitude = 0;
+        _prevCrashState = 0;
+        _prevAeroDamage = 0;
+        _prevEngineDamage = 0;
     }
 }

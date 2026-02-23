@@ -1,6 +1,6 @@
-using Rf2DsxBridge.Config;
+using Ams2DsxBridge.Config;
 
-namespace Rf2DsxBridge.Effects;
+namespace Ams2DsxBridge.Effects;
 
 public sealed class EffectMixer
 {

@@ -1,4 +1,4 @@
-namespace Rf2DsxBridge.Hid;
+namespace Ams2DsxBridge.Hid;
 
 public sealed class DualSenseReport
 {

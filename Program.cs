@@ -1,9 +1,9 @@
-using Rf2DsxBridge.Config;
-using Rf2DsxBridge.Effects;
-using Rf2DsxBridge.Output;
-using Rf2DsxBridge.Telemetry;
+using Ams2DsxBridge.Config;
+using Ams2DsxBridge.Effects;
+using Ams2DsxBridge.Output;
+using Ams2DsxBridge.Telemetry;
 
-namespace Rf2DsxBridge;
+namespace Ams2DsxBridge;
 
 internal static class Program
 {
@@ -11,7 +11,7 @@ internal static class Program
 
     static void Main(string[] args)
     {
-        Console.WriteLine("=== rF2 -> DualSense Haptic Bridge ===");
+        Console.WriteLine("=== AMS2 -> DualSense Haptic Bridge ===");
         Console.WriteLine();
 
         var configPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
@@ -52,7 +52,9 @@ internal static class Program
         int outputReconnectCounter = 0;
         int logCounter = 0;
 
-        Console.WriteLine("Waiting for rF2 telemetry and DualSense controller...");
+        Console.WriteLine("Waiting for AMS2 shared memory and DualSense controller...");
+        Console.WriteLine("[INFO] Make sure AMS2 Shared Memory is enabled:");
+        Console.WriteLine("       Options > Visuals > Hardware > Shared Memory = \"Project Cars 2\"");
         Console.WriteLine("Press Ctrl+C to exit.");
         Console.WriteLine();
 
@@ -66,7 +68,7 @@ internal static class Program
                     telemetryReconnectCounter = 0;
                     if (telemetry.TryConnect())
                     {
-                        Console.WriteLine("[OK] Connected to rF2 shared memory.");
+                        Console.WriteLine("[OK] Connected to AMS2 shared memory.");
                         telemetryWasConnected = true;
                     }
                 }
@@ -139,7 +141,7 @@ internal static class Program
             {
                 if (!telemetry.IsConnected && telemetryWasConnected)
                 {
-                    Console.WriteLine("\n[WARN] Lost rF2 connection. Reverting to safe state.");
+                    Console.WriteLine("\n[WARN] Lost AMS2 connection. Reverting to safe state.");
                     ResetAll(triggerEngine, rumbleEngine, mixer, output);
                     telemetryWasConnected = false;
                 }

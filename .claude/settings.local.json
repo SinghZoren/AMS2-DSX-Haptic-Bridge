@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl:*)",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:forum.reizastudios.com)",
+      "WebFetch(domain:www.overtake.gg)",
+      "WebFetch(domain:gitlab.com)",
+      "WebFetch(domain:www.xsimulator.net)",
+      "Bash(git mv:*)",
+      "Bash(dotnet build:*)"
+    ]
+  }
+}

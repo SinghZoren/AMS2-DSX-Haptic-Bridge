@@ -1,16 +1,15 @@
 using System.IO.MemoryMappedFiles;
-using System.Runtime.InteropServices;
 
-namespace Rf2DsxBridge.Telemetry;
+namespace Ams2DsxBridge.Telemetry;
 
 public sealed class TelemetryReader : IDisposable
 {
     private MemoryMappedFile? _mmf;
-    private MemoryMappedViewStream? _stream;
+    private MemoryMappedViewAccessor? _accessor;
     private bool _connected;
-    private readonly int _structSize;
     private readonly TelemetryFrameBuilder _frameBuilder;
-    private byte[]? _rawBuffer;
+    private byte[] _buffer;
+    private int _bufferSize;
 
     public bool IsConnected => _connected;
     public double BrakePedal { get; private set; }
@@ -19,7 +18,8 @@ public sealed class TelemetryReader : IDisposable
 
     public TelemetryReader(double wheelbaseMeter = 2.6, double maxSteerAngleDeg = 20.0)
     {
-        _structSize = Marshal.SizeOf<rF2Telemetry>();
+        _buffer = new byte[Ams2Constants.BUFFER_SIZE];
+        _bufferSize = Ams2Constants.BUFFER_SIZE;
         _frameBuilder = new TelemetryFrameBuilder(wheelbaseMeter, maxSteerAngleDeg);
     }
 
@@ -30,9 +30,19 @@ public sealed class TelemetryReader : IDisposable
 
         try
         {
-            _mmf = MemoryMappedFile.OpenExisting(Rf2Constants.MM_TELEMETRY_FILE_NAME);
-            _stream = _mmf.CreateViewStream(0, 0, MemoryMappedFileAccess.Read);
-            _rawBuffer = new byte[_structSize];
+            _mmf = MemoryMappedFile.OpenExisting(Ams2Constants.MM_SHARED_MEMORY_NAME);
+            _accessor = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+
+            long capacity = _accessor.Capacity;
+            if (capacity < 7400) // minimum to cover essential fields up to SuspensionVelocity
+            {
+                Console.WriteLine($"[TelemetryReader] Shared memory too small ({capacity} bytes).");
+                Disconnect();
+                return false;
+            }
+
+            _bufferSize = (int)Math.Min(capacity, Ams2Constants.BUFFER_SIZE);
+            _buffer = new byte[_bufferSize];
             _connected = true;
             return true;
         }
@@ -49,7 +59,7 @@ public sealed class TelemetryReader : IDisposable
 
     public bool Update()
     {
-        if (!_connected || _stream == null || _rawBuffer == null)
+        if (!_connected || _accessor == null)
         {
             BrakePedal = 0;
             ThrottlePedal = 0;
@@ -58,37 +68,34 @@ public sealed class TelemetryReader : IDisposable
 
         try
         {
-            _stream.Position = 0;
-            int bytesRead = _stream.Read(_rawBuffer, 0, _structSize);
-            if (bytesRead < _structSize)
+            // Sequence number validation for data consistency
+            // Odd sequence = game is mid-write, data may be inconsistent
+            uint seq1, seq2;
+            int retries = 0;
+            do
+            {
+                seq1 = _accessor.ReadUInt32(Ams2Offsets.SequenceNumber);
+                _accessor.ReadArray(0, _buffer, 0, _bufferSize);
+                seq2 = _accessor.ReadUInt32(Ams2Offsets.SequenceNumber);
+                retries++;
+            } while ((seq1 != seq2 || (seq1 & 1) != 0) && retries < 10);
+
+            if (retries >= 10)
+                return false;
+
+            // Check game state - only process when in-game
+            uint gameState = BitConverter.ToUInt32(_buffer, Ams2Offsets.GameState);
+            if (gameState < Ams2GameState.InGamePlaying || gameState > Ams2GameState.InGameReplay)
             {
                 BrakePedal = 0;
                 ThrottlePedal = 0;
                 return false;
             }
 
-            var handle = GCHandle.Alloc(_rawBuffer, GCHandleType.Pinned);
-            try
-            {
-                var telemetry = Marshal.PtrToStructure<rF2Telemetry>(handle.AddrOfPinnedObject());
-
-                if (telemetry.mNumVehicles <= 0 || telemetry.mVehicles == null)
-                {
-                    BrakePedal = 0;
-                    ThrottlePedal = 0;
-                    return false;
-                }
-
-                var player = telemetry.mVehicles[0];
-                CurrentFrame = _frameBuilder.Build(in player);
-                BrakePedal = CurrentFrame.BrakePedal;
-                ThrottlePedal = CurrentFrame.ThrottlePedal;
-                return true;
-            }
-            finally
-            {
-                handle.Free();
-            }
+            CurrentFrame = _frameBuilder.Build(_buffer);
+            BrakePedal = CurrentFrame.BrakePedal;
+            ThrottlePedal = CurrentFrame.ThrottlePedal;
+            return true;
         }
         catch (Exception ex)
         {
@@ -101,11 +108,10 @@ public sealed class TelemetryReader : IDisposable
     public void Disconnect()
     {
         _connected = false;
-        _stream?.Dispose();
-        _stream = null;
+        _accessor?.Dispose();
+        _accessor = null;
         _mmf?.Dispose();
         _mmf = null;
-        _rawBuffer = null;
         BrakePedal = 0;
         ThrottlePedal = 0;
         _frameBuilder.Reset();

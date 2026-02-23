@@ -1,6 +1,6 @@
-using Rf2DsxBridge.Effects;
+using Ams2DsxBridge.Effects;
 
-namespace Rf2DsxBridge.Output;
+namespace Ams2DsxBridge.Output;
 
 public interface IOutputSink : IDisposable
 {

@@ -1,6 +1,6 @@
-using Rf2DsxBridge.Config;
+using Ams2DsxBridge.Config;
 
-namespace Rf2DsxBridge.Dsx;
+namespace Ams2DsxBridge.Dsx;
 
 public sealed class TriggerMapper
 {

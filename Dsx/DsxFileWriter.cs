@@ -1,4 +1,4 @@
-namespace Rf2DsxBridge.Dsx;
+namespace Ams2DsxBridge.Dsx;
 
 public sealed class DsxFileWriter
 {

@@ -1,4 +1,4 @@
-namespace Rf2DsxBridge.Effects;
+namespace Ams2DsxBridge.Effects;
 
 public struct RumbleEffect
 {
